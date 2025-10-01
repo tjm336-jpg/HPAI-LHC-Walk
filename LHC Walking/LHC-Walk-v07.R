@@ -4,23 +4,25 @@ start_time           <- Sys.time()
 #=======================================================================================================================#
 # Validation Variable
 check_Initial_Values <- FALSE
-check_season         <- FALSE
-check_births         <- FALSE
+check_season         <- TRUE
+check_births         <- TRUE
+check_iGraph         <- FALSE
 
 # Save Data variables
-#write_output         <- FALSE
-#save_plots           <- FALSE
-#save_data            <- FALSE
+write_output         <- FALSE
+save_plots           <- FALSE
+save_data            <- FALSE
 
 # Experimental Variables
-#seasons_calc         <- TRUE
+seasons_calc         <- TRUE
 iterate              <- TRUE
-num_samples          <- 3
+cluster              <- TRUE
+num_samples          <- 1
 #numclusters          <- 2
 #doclusters           <- FALSE
 pred_Introduce       <- FALSE
 albs_Introduce       <- FALSE
-midseason_pred       <- FALSE
+midseason_pred       <- TRUE
 midseason_albs       <- FALSE
 
 #=======================================================================================================================#
@@ -29,8 +31,12 @@ midseason_albs       <- FALSE
 library(ggplot2)
 library(deSolve)
 library(lhs)
-library(tibble)
 library(dplyr)
+library(tidyr)
+library(tibble)
+library(cowplot)
+library(progress)
+library(ggh4x)
 
 #=======================================================================================================================#
 #                                                Generate Variables:
@@ -60,12 +66,18 @@ generate_Intitial_values <- function(popvar){
   Initial_values <- c(
     S_Gentoo    = popvar$Res_gentoo,      # Susceptible
     I_Gentoo    = 0,                      # Infected
+    R_Gentoo    = 0,                      # Recovered
+    D_Gentoo    = 0,                      # Dead
     
     S_Predators = popvar$Res_preds,       # Susceptible
     I_Predators = 0,                      # Infected
+    R_Predators = 0,                      # Recovered
+    D_Predators = 0,                      # Dead
     
     S_Albatross = popvar$Res_albatross,   # Susceptible
     I_Albatross = 0,                      # Infected
+    R_Albatross = 0,                      # Recovered
+    D_Albatross = 0,                      # Dead
     
     timer       = 0
   )
@@ -187,7 +199,13 @@ create_migin_eventdata  <- function(timevar, popvar){
     method = "add"
   )
   
-  migineventdata      <- rbind(df_alb, df_pred)
+  df_newI <- data.frame(
+    var    = c("I_Predators",      "I_Albatross",      "S_Predators",      "S_Albatross"),
+    time   = c(popvar$ms_pred_day, popvar$ms_albs_day, popvar$ms_pred_day, popvar$ms_albs_day),
+    value  = c(5,                  5,                  -5,                 -5),
+    method = "add"
+  )
+  migineventdata      <- rbind(df_alb, df_pred, df_newI)
   migineventdata$time <- round(migineventdata$time, 3)
   migineventdata      <- migineventdata[order(migineventdata$time), ]
   
@@ -216,6 +234,14 @@ create_hatch_eventdata  <- function(timevar, popvar, N_Gent, N_Pred, N_Albs){
     method = "add"
   )
   
+  df_newI <- data.frame(
+    var    = c("I_Predators",      "I_Albatross",      "S_Predators",      "S_Albatross"),
+    time   = c(popvar$ms_pred_day, popvar$ms_albs_day, popvar$ms_pred_day, popvar$ms_albs_day),
+    value  = c(5,                  5,                  -5,                 -5),
+    method = "add"
+  )
+  
+  hatcheventdata      <- rbind(hatcheventdata, df_newI)
   hatcheventdata$time <- round(hatcheventdata$time, 3)
   hatcheventdata      <- hatcheventdata[order(hatcheventdata$time), ]
   
@@ -267,17 +293,17 @@ create_migout_eventdata <- function(timevar, popvar, statedeparturevector){
 #=======================================================================================================================#
 #                                                  Model Functions:
 #=======================================================================================================================#
-seasonality_transmission_calc <- function(time, timevar){
-  if(time < (timevar$t_arrival + (timevar$mig_day_arrival / 2))){
+seasonality_transmission_calc <- function(time, t_arrival, mig_day_arrival, breed_start, hatch_start, t_departure){
+  if(time < (t_arrival + (mig_day_arrival / 2))){
     1 # Before arrival
   } else{
-    if(time < timevar$breed_start){
+    if(time < breed_start){
       2 # During Arrival/Mating
     } else{
-      if(time < timevar$hatch_start){
+      if(time < hatch_start){
         1 # After eggs are laid
       } else{
-        if(time < timevar$t_departure){
+        if(time < t_departure){
           2 # After eggs are hatched
         } else{
           1 # After migration out
@@ -286,80 +312,206 @@ seasonality_transmission_calc <- function(time, timevar){
     }
   }
 }
+make_beta                     <- function(gentgent_trans, gentpred_trans, 
+                                          predgent_trans, predpred_trans, predalbs_trans, 
+                                          albspred_trans, albsalbs_trans){
+  species = c("gentoo", "predators", "albatross")
+  beta <- matrix(
+    c(
+      gentgent_trans, gentpred_trans, 0,
+      predgent_trans, predpred_trans, predalbs_trans,
+      0,              albspred_trans, albsalbs_trans
+    ),
+    nrow = 3, byrow = TRUE,
+    dimnames = list(species, species)
+  )
+  beta
+}
+calc_R0                       <- function(beta, S0, gamma, muI){
+  removal = gamma + muI
+  if(any(removal <= 0)) stop("All removal (gamma + muI) must be > 0")
+  
+  K <- sweep(beta, 2, removal, "/")
+  K <- sweep(K, 1, S0, "*")
+  
+  ev <- eigen(K, only.values = TRUE)$values
+  list(R0 = max(Mod(ev)), eigenvalues = ev)
+}
 HPAI_dyn                      <- function(time, state, parameters){
   # Extract state
-  S_Gentoo    <- round(state["S_Gentoo"]   , 4)
-  I_Gentoo    <- round(state["I_Gentoo"]   , 4)
-  S_Predators <- round(state["S_Predators"], 4)
-  I_Predators <- round(state["I_Predators"], 4)
-  S_Albatross <- round(state["S_Albatross"], 4)
-  I_Albatross <- round(state["I_Albatross"], 4)
+  S_Gentoo        <- state["S_Gentoo"]
+  I_Gentoo        <- state["I_Gentoo"]
+  R_Gentoo        <- state["R_Gentoo"]
+  D_Gentoo        <- state["D_Gentoo"]
   
-  timer       <- state["timer"]
+  S_Predators     <- state["S_Predators"]
+  I_Predators     <- state["I_Predators"]
+  R_Predators     <- state["R_Predators"]
+  D_Predators     <- state["D_Predators"]
   
-  # Extract parameters
-  muH_Gentoo     <- parameters["muH_Gentoo"]
-  muH_Preds      <- parameters["muH_Preds"]
-  muH_Albs       <- parameters["muH_Albs"]
+  S_Albatross     <- state["S_Albatross"]
+  I_Albatross     <- state["I_Albatross"]
+  R_Albatross     <- state["R_Albatross"]
+  D_Albatross     <- state["D_Albatross"]
   
-  muI_Gentoo     <- parameters["muI_Gentoo"]
-  muI_Preds      <- parameters["muI_Preds"]
-  muI_Albs       <- parameters["muI_Albs"]
+  timer           <- state["timer"]
   
-  gentgent_trans <- parameters["gentgent_trans"]
-  gentpred_trans <- parameters["gentpred_trans"]
-  predgent_trans <- parameters["predgent_trans"]
-  predpred_trans <- parameters["predpred_trans"]
-  predalbs_trans <- parameters["predalbs_trans"]
-  albspred_trans <- parameters["albspred_trans"]
-  albsalbs_trans <- parameters["albsalbs_trans"]
+  # Extract parameters [Time]
+  seasons_calc     = parameters["seasons_calc"]
+  t_arrival        = parameters["t_arrival"] 
+  mig_day_arrival  = parameters["mig_day_arrival"]
+  breed_start      = parameters["breed_start"] 
+  hatch_start      = parameters["hatch_start"]
+  t_departure      = parameters["t_departure"]
   
-  t_departure    <- parameters["t_departure"]
+  # Extract parameters [Mortality Rates (Healthy (H) vs. Infected (I))]
+  muH_Gentoo      <- parameters["muH_Gentoo"]
+  muH_Preds       <- parameters["muH_Preds"]
+  muH_Albs        <- parameters["muH_Albs"]
+  muI_Gentoo      <- parameters["muI_Gentoo"]
+  muI_Preds       <- parameters["muI_Preds"]
+  muI_Albs        <- parameters["muI_Albs"]
+  
+  
+  # Extract parameters [Recovery Rates (Gamma) and Immunity Loss Rates (Sigma)]
+  gamma_gentoo    <- parameters["gamma_gentoo"]
+  sigma_gentoo    <- parameters["sigma_gentoo"]
+  gamma_preds     <- parameters["gamma_preds"]
+  sigma_preds     <- parameters["sigma_preds"]
+  gamma_albatross <- parameters["gamma_albatross"]
+  sigma_albatross <- parameters["sigma_albatross"]
+  
+  # Extract parameters [Betas]
+  gentgent_trans  <- parameters["gentgent_trans"]
+  gentpred_trans  <- parameters["gentpred_trans"]
+  predgent_trans  <- parameters["predgent_trans"]
+  predpred_trans  <- parameters["predpred_trans"]
+  predalbs_trans  <- parameters["predalbs_trans"]
+  albspred_trans  <- parameters["albspred_trans"]
+  albsalbs_trans  <- parameters["albsalbs_trans"]
+  
+  # guard names exist
+  need_states <- c("S_Gentoo","I_Gentoo","R_Gentoo","D_Gentoo",
+                   "S_Predators","I_Predators","R_Predators","D_Predators",
+                   "S_Albatross","I_Albatross","R_Albatross","D_Albatross","timer")
+  need_parms  <- c("t_arrival","mig_day_arrival","breed_start","hatch_start","t_departure", "seasons_calc",
+                   "muH_Gentoo","muH_Preds","muH_Albs",
+                   "muI_Gentoo","muI_Preds","muI_Albs",
+                   "gamma_gentoo","sigma_gentoo","gamma_preds","sigma_preds","gamma_albatross","sigma_albatross",
+                   "gentgent_trans","gentpred_trans","predgent_trans","predpred_trans",
+                   "predalbs_trans","albspred_trans","albsalbs_trans")
+  if (!all(need_states %in% names(state))) stop("Missing state(s): ", paste(setdiff(need_states,names(state)), collapse=","))
+  if (!all(need_parms %in% names(parameters))) stop("Missing param(s): ", paste(setdiff(need_parms,names(parameters)), collapse=","))
+  
+  # optional: clamp tiny negatives
+  if(S_Gentoo    < 0 || I_Gentoo < 0    || R_Gentoo < 0 ||
+     S_Predators < 0 || I_Predators < 0 || R_Predators < 0 ||
+     S_Albatross < 0 || I_Albatross < 0 || R_Albatross < 0){
+    S_Gentoo    <- max(S_Gentoo, 0); I_Gentoo    <- max(I_Gentoo, 0)
+    S_Predators <- max(S_Predators,0); I_Predators<- max(I_Predators,0)
+    S_Albatross <- max(S_Albatross,0); I_Albatross<- max(I_Albatross,0)
+  }
+  
+  # Set the seasonality modifier
+  if(seasons_calc == TRUE){
+    seasMod         <- seasonality_transmission_calc(time, t_arrival, mig_day_arrival, breed_start, 
+                                                     hatch_start, t_departure)
+  } else{
+    seasMod <- 1
+  }
   
   #===============#
   #    Gentoo     #
   #===============#
   dS_Gentoo = 
-    - muH_Gentoo     * S_Gentoo                  -
-      gentgent_trans * S_Gentoo    * I_Gentoo    -
-      predgent_trans * S_Gentoo    * I_Predators 
+    - muH_Gentoo      * S_Gentoo -                   
+      gentgent_trans  * S_Gentoo    * I_Gentoo    * seasMod -     
+      predgent_trans  * S_Gentoo    * I_Predators * seasMod +
+      sigma_gentoo    * R_Gentoo
   
   dI_Gentoo = 
-    - muI_Gentoo     * I_Gentoo                  +
-      gentpred_trans * S_Gentoo    * I_Gentoo    +
-      predgent_trans * S_Gentoo    * I_Predators 
-
+    - muI_Gentoo      * I_Gentoo +                  
+      gentgent_trans  * S_Gentoo    * I_Gentoo    * seasMod +
+      predgent_trans  * S_Gentoo    * I_Predators * seasMod -
+      gamma_gentoo    * I_Gentoo
+  
+  dR_Gentoo = 
+    + gamma_gentoo    * I_Gentoo -
+      sigma_gentoo    * R_Gentoo
+  
+  dD_Gentoo = 
+    muI_Gentoo        * I_Gentoo
+  
   #===============#
   #   Predators   #
   #===============#
   dS_Predators = 
-    - muH_Preds      * S_Predators               +
-      gentpred_trans * S_Predators * I_Gentoo    -
-      predpred_trans * S_Predators * I_Predators -
-      albspred_trans * S_Predators * I_Albatross
+    - muH_Preds       * S_Predators -              
+      gentpred_trans  * S_Predators * I_Gentoo    * seasMod -
+      predpred_trans  * S_Predators * I_Predators * seasMod -
+      albspred_trans  * S_Predators * I_Albatross * seasMod +
+      sigma_preds     * R_Predators
   
   dI_Predators = 
-    - muI_Preds      * S_Predators               +
-      gentpred_trans * S_Predators * I_Gentoo    +
-      predpred_trans * S_Predators * I_Predators +
-      albspred_trans * S_Predators * I_Albatross
+    - muI_Preds       * I_Predators +              
+      gentpred_trans  * S_Predators * I_Gentoo    * seasMod +
+      predpred_trans  * S_Predators * I_Predators * seasMod +
+      albspred_trans  * S_Predators * I_Albatross * seasMod -
+      gamma_preds     * I_Predators
+  
+  dR_Predators = 
+    + gamma_preds     * I_Predators -
+      sigma_preds     * R_Predators
+  
+  dD_Predators = 
+    muI_Preds         * I_Predators
   
   #===============#
   #   Albatross   #
   #===============#
+  if (time < t_departure){
+    mort_S_alb <- muH_Albs * S_Albatross
+    mort_I_alb <- muI_Albs * I_Albatross
+  } else{
+    mort_S_alb <- 0
+    mort_I_alb <- 0
+  } # Do not count mortality after migration out starts
   dS_Albatross = 
-    ifelse(time < t_departure, - muH_Albs * S_Albatross, 0) -
-      predalbs_trans * S_Albatross * I_Predators -
-      albsalbs_trans * S_Albatross * I_Albatross 
+    - mort_S_alb -
+      predalbs_trans  * S_Albatross * I_Predators * seasMod -
+      albsalbs_trans  * S_Albatross * I_Albatross * seasMod +
+      sigma_albatross * R_Albatross
   
   dI_Albatross = 
-    ifelse(time < t_departure, - muI_Albs * S_Albatross, 0) +
-      predalbs_trans * S_Albatross * I_Predators +
-      albsalbs_trans * S_Albatross * I_Albatross 
+    - mort_I_alb +
+      predalbs_trans  * S_Albatross * I_Predators * seasMod +
+      albsalbs_trans  * S_Albatross * I_Albatross * seasMod -
+      gamma_albatross * I_Albatross
   
+  dR_Albatross = 
+    + gamma_albatross * I_Albatross -
+      sigma_albatross * R_Albatross
+  
+  dD_Albatross =
+    mort_I_alb
+  
+  #===============#
+  #    Timer      #
+  #===============#
   dTimer = 1
   
-  list(c(dS_Gentoo, dI_Gentoo, dS_Predators, dI_Predators, dS_Albatross, dI_Albatross, dTimer))
+  #Clean up and return values
+  derivs <- c(
+    dS_Gentoo,    dI_Gentoo,    dR_Gentoo,    dD_Gentoo,
+    dS_Predators, dI_Predators, dR_Predators, dD_Predators,
+    dS_Albatross, dI_Albatross, dR_Albatross, dD_Albatross,
+    dTimer
+  )
+  
+  # strip any accidental names
+  names(derivs) <- NULL
+  
+  list(derivs)
 }
 run_Model                     <- function(timevar, popvar, Initial_values, parameters){
   # Set the three distinct time pieces that will be evaluated
@@ -386,9 +538,15 @@ run_Model                     <- function(timevar, popvar, Initial_values, param
   names(statedeparturevector) <- names(Initial_values)
 
   # Set the hatching eventdata
-  N_Gent <- as.numeric(statedeparturevector["S_Gentoo"])    + as.numeric(statedeparturevector["I_Gentoo"])
-  N_Pred <- as.numeric(statedeparturevector["S_Predators"]) + as.numeric(statedeparturevector["I_Predators"])
-  N_Albs <- as.numeric(statedeparturevector["S_Albatross"]) + as.numeric(statedeparturevector["I_Albatross"])
+  N_Gent <- as.numeric(statedeparturevector["S_Gentoo"])    + 
+    as.numeric(statedeparturevector["I_Gentoo"]) +
+    as.numeric(statedeparturevector["R_Gentoo"])
+  N_Pred <- as.numeric(statedeparturevector["S_Predators"]) + 
+    as.numeric(statedeparturevector["I_Predators"]) +
+    as.numeric(statedeparturevector["R_Predators"])
+  N_Albs <- as.numeric(statedeparturevector["S_Albatross"]) + 
+    as.numeric(statedeparturevector["I_Albatross"]) +
+    as.numeric(statedeparturevector["R_Albatross"])
   hatcheventdata <- create_hatch_eventdata(timevar, popvar, N_Gent, N_Pred, N_Albs)
   
   # Run the second chunk of the ODE (Hatching -> Departure)
@@ -407,9 +565,15 @@ run_Model                     <- function(timevar, popvar, Initial_values, param
   names(statedeparturevector) <- names(Initial_values)
 
   # Set the hatching eventdata
-  N_Gent <- as.numeric(statedeparturevector["S_Gentoo"])    + as.numeric(statedeparturevector["I_Gentoo"])
-  N_Pred <- as.numeric(statedeparturevector["S_Predators"]) + as.numeric(statedeparturevector["I_Predators"])
-  N_Albs <- as.numeric(statedeparturevector["S_Albatross"]) + as.numeric(statedeparturevector["I_Albatross"])
+  N_Gent <- as.numeric(statedeparturevector["S_Gentoo"])    + 
+    as.numeric(statedeparturevector["I_Gentoo"]) +
+    as.numeric(statedeparturevector["R_Gentoo"])
+  N_Pred <- as.numeric(statedeparturevector["S_Predators"]) + 
+    as.numeric(statedeparturevector["I_Predators"]) +
+    as.numeric(statedeparturevector["R_Predators"])
+  N_Albs <- as.numeric(statedeparturevector["S_Albatross"]) + 
+    as.numeric(statedeparturevector["I_Albatross"]) +
+    as.numeric(statedeparturevector["R_Albatross"])
   migout_eventdata <- create_migout_eventdata(timevar, popvar, statedeparturevector)
   
   # Run the second chunk of the ODE (Departure -> End of Model)
@@ -430,24 +594,141 @@ run_Model                     <- function(timevar, popvar, Initial_values, param
   out <- rbind(solved1, solved2, solved3)
   names(out) <- c(
     "Time",
-    "Susceptible_Gentoo", "Infected_Gentoo",
-    "Susceptible_Predators", "Infected_Predators",
-    "Susceptible_Albatross", "Infected_Albatross",
+    "Susceptible_Gentoo",    "Infected_Gentoo",    "Recovered_Gentoo",    "HPAI_Killed_Gentoo",
+    "Susceptible_Predators", "Infected_Predators", "Recovered_Predators", "HPAI_Killed_Predators",
+    "Susceptible_Albatross", "Infected_Albatross", "Recovered_Albatross", "HPAI_Killed_Albatross",
     "Timer"
   )
   out <- out[!duplicated(out$Time),]
   
+  # Connect pre- and post- migration outs and then calculate cross-species transmission events
+  inc_gentgent <- parameters["gentgent_trans"] * out$Susceptible_Gentoo    * out$Infected_Gentoo
+  inc_gentpred <- parameters["gentpred_trans"] * out$Susceptible_Predators * out$Infected_Gentoo
+  inc_predgent <- parameters["predgent_trans"] * out$Susceptible_Gentoo    * out$Infected_Predators
+  inc_predpred <- parameters["predpred_trans"] * out$Susceptible_Predators * out$Infected_Predators
+  inc_predalbs <- parameters["predalbs_trans"] * out$Susceptible_Albatross * out$Infected_Predators
+  inc_albspred <- parameters["albspred_trans"] * out$Susceptible_Predators * out$Infected_Albatross
+  inc_albsalbs <- parameters["albsalbs_trans"] * out$Susceptible_Albatross * out$Infected_Albatross
+  
+  # Calculate the cumulative infections for each transmission type, compartment, and in total
+  dt     <- diff(out$Time)[1]
+  cum_gg <- sum(inc_gentgent) * dt
+  cum_gp <- sum(inc_gentpred) * dt
+  cum_pg <- sum(inc_predgent) * dt
+  cum_pp <- sum(inc_predpred) * dt
+  cum_pa <- sum(inc_predalbs) * dt
+  cum_ap <- sum(inc_albspred) * dt
+  cum_aa <- sum(inc_albsalbs) * dt
+  
+  CI_Gentoo    <- cum_gg + cum_pg
+  CI_Predators <- cum_gp + cum_pp + cum_ap
+  CI_Albatross <- cum_pa + cum_aa
+  CI_Total     <- CI_Gentoo + CI_Predators + CI_Albatross
+  
+  # Calculate R0 (Next Generation Matrix Method)
+  if(!popvar$prev_infection_albs == 0 && !popvar$prev_infection_preds == 0 && !popvar$ms_pred_day == -1 && !popvar$ms_albs_day == -1){
+    beta <- make_beta(
+      parameters["gentgent_trans"], parameters["gentpred_trans"],
+      parameters["predgent_trans"], parameters["predpred_trans"], parameters["predalbs_trans"],
+      parameters["albspred_trans"], parameters["albsalbs_trans"])
+    if(!popvar$prev_infection_albs == 0 || !popvar$prev_infection_preds == 0){
+      S0 <- c(gentoo    = 0,
+              predators = out[ timevar$t_arrival + timevar$mig_day_arrival, "Infected_Predators"],
+              albatross = out[ timevar$t_arrival + timevar$mig_day_arrival, "Infected_Albatross"])
+    } else if(!popvar$ms_pred_day == -1){
+      S0 <- c(gentoo    = 0,
+              predators = out[ popvar$ms_pred_day + 2, "Infected_Predators"],
+              albatross = 0)
+    } else if(!popvar$ms_albs_day == -1){
+      S0 <- c(gentoo    = 0,
+              predators = 0,
+              albatross = out[ popvar$ms_albs_day + 2, "Infected_Albatross"])
+    }
+    gamma <- c(parameters["gamma_gentoo"], parameters["gamma_preds"], parameters["gamma_albatross"])
+    muI   <- c(parameters["muI_Gentoo"], parameters["muI_Preds"], parameters["muI_Albs"])
+    eigen <- calc_R0(beta, S0, gamma, muI)
+    R0    <- eigen$R0
+  } else{
+    R0 <- NA
+  }
+  
+  # Create the return variable with all the data of interest
+  #     Note: If the number of variables being returned changes, ensure that the dfMaster function NCol argument
+  #           is adjusted accordingly, if not, the code will return an error. 
+  df                     <- data.frame(prev_infection_preds = popvar$prev_infection_preds)
+  df$midseason_pred_day  <- popvar$midseason_pred_day
+  df$prev_infection_albs <- popvar$prev_infection_albs
+  df$midseason_albs_day  <- popvar$midseason_albs_day
+  df$gamma_gentoo        <- parameters["gamma_gentoo"]
+  df$muI_gentoo          <- parameters["muI_Gentoo"]
+  df$gamma_predators     <- parameters["gamma_preds"]
+  df$muI_predators       <- parameters["muI_Preds"]
+  df$gamma_albatross     <- parameters["gamma_albatross"]
+  df$muI_albatross       <- parameters["muI_Albs"]
+  df$Beta_GentGent       <- parameters["gentgent_trans"]
+  df$Beta_GentPred       <- parameters["gentpred_trans"]
+  df$Beta_PredGent       <- parameters["predgent_trans"]
+  df$Beta_PredPred       <- parameters["predpred_trans"]
+  df$Beta_PredAlbs       <- parameters["predalbs_trans"]
+  df$Beta_AlbsPred       <- parameters["albspred_trans"]
+  df$Beta_AlbsAlbs       <- parameters["albsalbs_trans"]
+  df$R0                  <- R0
+  df$maxI_Gentoo         <- max(out["Infected_Gentoo"])
+  df$maxI_Predators      <- max(out["Infected_Predators"])
+  df$maxI_Albatross      <- max(out["Infected_Albatross"])
+  df$terI_Gentoo         <- out[ nrow(out), "Infected_Gentoo"]
+  df$terI_Predators      <- out[ nrow(out), "Infected_Predators"]
+  df$overwintering       <- ifelse(df$terI_Gentoo >= 1 || df$terI_Predators >= 1, 1, 0)
+  df$outbreakdur         <- length(which(out$Infected_Gentoo + out$Infected_Predators + out$Infected_Albatross > 2))
+  df$outbreakspan        <- ifelse(df$outbreakdur > (timevar$t_departure - timevar$t_arrival - 5), 1, 0)
+  df$infperiod_Gentoo    <- length(which(out$Infected_Gentoo    > 1))
+  df$infperiod_Predators <- length(which(out$Infected_Predators > 1))
+  df$infperiod_Albatross <- length(which(out$Infected_Albatross > 1))
+  df$deadGentoo          <- out[ nrow(out), "HPAI_Killed_Gentoo"]
+  df$deadPredators       <- out[ nrow(out), "HPAI_Killed_Predators"]
+  df$deadAlbatross       <- out[ nrow(out), "HPAI_Killed_Albatross"]
+  df$gentpred_transevents<- cum_gp
+  df$predgent_transevents<- cum_pg
+  df$predalbs_transevents<- cum_pa
+  df$albspred_transevents<- cum_ap
+  df$cuminf_Total        <- CI_Total
+  df$cuminf_Gentoo       <- CI_Gentoo
+  df$cuminf_Predators    <- CI_Predators
+  df$cuminf_Albatross    <- CI_Albatross
+  
   # Return the dataframe
-  return(out)
+  return(list(df = df, values = out))
 }
 
 #=======================================================================================================================#
 #                                              Validation Functions:
 #=======================================================================================================================#
+validate_variablecombinations <- function(iterate, cluster, check_iGraph, 
+                                          num_samples, pred_Introduce, albs_Introduce, 
+                                          midseason_pred, midseason_albs){
+  # Combination variable check
+  if(iterate == FALSE && cluster == TRUE){
+    stop("Error: Cannot do clustering without iteration. Set 'iterate' to TRUE.")
+  }
+  if(check_iGraph == TRUE && iterate == FALSE){
+    stop("Error: Cannot check iGraph without iteration. Set 'iterate' to TRUE.")
+  }
+  if(check_iGraph == TRUE && num_samples > 30){
+    warning("Warning: iGraph check will produce an unreasonable number of graphs.")
+  }
+  if(cluster == TRUE && num_samples < 1700){
+    warning("Warning: Clustering may not be effective with fewer than 1700 samples.")
+  }
+  if(cluster == TRUE && pred_Introduce == FALSE && albs_Introduce == FALSE && 
+     midseason_pred == FALSE && midseason_albs == FALSE){
+    stop("Error: Cannot do clustering without introducing infection. Set one of the introduction variables to TRUE.")
+  }
+}
 validate_Seasonality          <- function(func, time, timevar){
   # Calculate values
   values <- vapply(time,
-                   function(x) func(x, timevar),
+                   function(x) func(x, timevar$t_arrival, timevar$mig_day_arrival, timevar$breed_start, 
+                                    timevar$hatch_start, timevar$t_departure),
                    FUN.VALUE = numeric(1))
   
   df <- data.frame(
@@ -479,13 +760,6 @@ validate_Births               <- function(timevar, popvar, Initial_values, muH_L
     muI_Preds        = 0,
     muI_Albs         = 0,
     
-    gammas_gentoo    = 0,
-    sigma_gentoo     = 0,
-    gammas_preds     = 0,
-    sigma_preds      = 0,
-    gammas_albatross = 0,
-    sigma_albatross  = 0,
-    
     gentgent_trans   = 0,
     gentpred_trans   = 0,
     predgent_trans   = 0,
@@ -494,21 +768,35 @@ validate_Births               <- function(timevar, popvar, Initial_values, muH_L
     albspred_trans   = 0,
     albsalbs_trans   = 0,
     
+    gamma_gentoo     = 0,
+    sigma_gentoo     = 0,
+    gamma_preds      = 0,
+    sigma_preds      = 0,
+    gamma_albatross  = 0,
+    sigma_albatross  = 0,
+    
+    seasons_calc     = FALSE,
+    t_arrival        = timevar$t_arrival,
+    mig_day_arrival  = timevar$mig_day_arrival,
+    breed_start      = timevar$breed_start,
+    hatch_start      = timevar$hatch_start,
     t_departure      = timevar$t_departure
   )
   
   popvar$prev_infection_preds <- 0
   popvar$prev_infection_albs  <- 0
+  popvar$midseason_pred_day   <- -1
+  popvar$midseason_albs_day   <- -1
   
-#  parameters <- NULL
-  # Rune the model to get values for the whole spectrum
-  values <- run_Model(timevar, popvar, Initial_values, parmsBirth)
+  # Run the model to get values for the whole time range
+  output <- run_Model(timevar, popvar, Initial_values, parmsBirth)
+  values <- output$values
   
   # Set what columns to graph
   sus_cols <- c("Susceptible_Gentoo",
                 "Susceptible_Predators",
                 "Susceptible_Albatross")
-  
+
   # Rearrange values data frame and only have the "Susceptible" compartment
   df_long <- as.data.frame(values) %>%
     select(Time, all_of(sus_cols)) %>%
@@ -517,7 +805,7 @@ validate_Births               <- function(timevar, popvar, Initial_values, muH_L
       Species = sub("^Susceptible_", "", compartment),
       Species = factor(Species, levels = c("Gentoo", "Predators", "Albatross"))
     )
-  
+
   # Plot df_long
   p <- ggplot(df_long, aes(x = Time, y = value)) +
     geom_line(color = "steelblue") +
@@ -540,10 +828,47 @@ validate_Births               <- function(timevar, popvar, Initial_values, muH_L
   # Return p for visualization or saving
   return(p)
 }
+validate_iGraphs              <- function(values, popvar){
+  inf_cols <- c("Infected_Gentoo","Infected_Predators","Infected_Albatross")
+  
+  df_long <- as.data.frame(values) %>%
+    select(Time, all_of(inf_cols)) %>%
+    pivot_longer(-Time, names_to = "compartment", values_to = "value") %>%
+    mutate(
+      Species = sub("^Infected_", "", compartment),
+      Species = factor(Species, levels = c("Gentoo","Predators","Albatross"))
+    )
+  
+  caps <- c(
+    Gentoo    = as.numeric(popvar$total_gentoo)    * 1.3,
+    Predators = as.numeric(popvar$total_preds)     * 1.3,
+    Albatross = as.numeric(popvar$total_albatross) * 1.3
+  )
+  
+  ggplot(df_long, aes(x = Time, y = value)) +
+    geom_line(color = "orange") +
+    facet_wrap(~ Species, ncol = 1, scales = "free_y") +   # <-- make y free
+    ggh4x::facetted_pos_scales(
+      y = list(
+        Species == "Gentoo"    ~ scale_y_continuous(limits = c(0, caps[["Gentoo"]]),    expand = expansion(mult = c(0, 0.05))),
+        Species == "Predators" ~ scale_y_continuous(limits = c(0, caps[["Predators"]]), expand = expansion(mult = c(0, 0.05))),
+        Species == "Albatross" ~ scale_y_continuous(limits = c(0, caps[["Albatross"]]), expand = expansion(mult = c(0, 0.05)))
+      )
+    ) +
+    labs(title = "Infected Dynamics Over Time", x = "Time (days)", y = "Infected") +
+    theme_minimal() +
+    theme(strip.text = element_text(face = "bold"),
+          panel.spacing.y = unit(0.8, "lines"))
+}
 
 #=======================================================================================================================#
 #                                                     Main:
 #=======================================================================================================================#
+# Validate variable combination used
+validate_variablecombinations(iterate, cluster, check_iGraph, 
+                              num_samples, pred_Introduce, albs_Introduce, 
+                              midseason_pred, midseason_albs)
+
 # Generate Latin Hypercube parameters
 U <- randomLHS(n = num_samples, k = 17)
 
@@ -555,10 +880,10 @@ ifelse(albs_Introduce == TRUE,
        prev_infections_albs  <-       qunif(U[, 2], min = 0.01, max = 0.5),
        prev_infections_albs  <- rep(0, num_samples))
 ifelse(midseason_pred == TRUE, 
-       midseason_pred_days   <- round(qunif(U[, 3], min = timevar$t_arrival + 10, max = timevar$t_departure - 10)), 
+       midseason_pred_days   <- round(qunif(U[, 3], min = timevar$t_arrival, max = timevar$t_departure)), 
        midseason_pred_days   <- rep(-1, num_samples))
 ifelse(midseason_albs == TRUE, 
-       midseason_albs_days   <- round(qunif(U[, 4], min = timevar$t_arrival + 10, max = timevar$t_departure - 10)), 
+       midseason_albs_days   <- round(qunif(U[, 4], min = timevar$t_arrival, max = timevar$t_departure)), 
        midseason_albs_days   <- rep(-1, num_samples))
 
 # Generate global variables
@@ -576,15 +901,39 @@ albspreds_trans <- qunif(U[, 16], min = 0, max = 0.00005)
 albsalbss_trans <- qunif(U[, 17], min = 0, max = 0.00005)
 time            <- seq(from = 0, to =  timevar$horizon)
 
-print(gammasigma_List$sigma_gentoo)
-
 if(iterate == TRUE){
+  dfMaster                      <- data.frame(matrix(NA, nrow = num_samples, ncol = 38))
+  
+  # Establish the valarray variable that will hold all the values for the compartments for all the different iterations of the model
+  compartments <- c(
+    "Susceptible_Gentoo",    "Infected_Gentoo",    "Recovered_Gentoo",    "HPAI_Killed_Gentoo",
+    "Susceptible_Predators", "Infected_Predators", "Recovered_Predators", "HPAI_Killed_Predators",
+    "Susceptible_Albatross", "Infected_Albatross", "Recovered_Albatross", "HPAI_Killed_Albatross"
+  )
+  valarray     <- array(
+    NA_real_,
+    dim      = c(length(compartments), length(0:timevar$horizon), num_samples),
+    dimnames = list(compartment = compartments,
+                    time        = as.character(0:timevar$horizon),
+                    sample      = paste0("sample_", seq_len(num_samples)))
+  )
+  
+  # Create a progress bar
+  pb <- progress_bar$new(
+    format = "Sample Generation [:bar] :percent | Elapsed: :elapsed | ETA: :eta",
+    total = num_samples, clear = FALSE, width = 90
+  )
+  
+  # Iterate over the number of samples
   for(i in 1:num_samples){
-    popvar$prev_infection_preds <- prev_infections_preds[i]
-    popvar$prev_infection_albs  <- prev_infections_albs[i]
-    
-    
+    # Set parameters for the current iteration
     parameters <- c(
+      t_arrival        = timevar$t_arrival, 
+      mig_day_arrival  = timevar$mig_day_arrival,
+      breed_start      = timevar$breed_start, 
+      hatch_start      = timevar$hatch_start,
+      t_departure      = timevar$t_departure,
+      
       muH_Gentoo       = muH_List$muH_Gentoo,
       muH_Preds        = muH_List$muH_Preds,
       muH_Albs         = muH_List$muH_Albs,
@@ -592,6 +941,13 @@ if(iterate == TRUE){
       muI_Gentoo       = gammasigma_List$muIs_gentoo[i],
       muI_Preds        = gammasigma_List$muIs_Preds[i],
       muI_Albs         = gammasigma_List$muIs_Albs[i],
+      
+      gamma_gentoo     = gammasigma_List$gammas_gentoo[i],
+      sigma_gentoo     = gammasigma_List$sigma_gentoo,
+      gamma_preds      = gammasigma_List$gammas_preds[i],
+      sigma_preds      = gammasigma_List$sigma_preds,
+      gamma_albatross  = gammasigma_List$gammas_albatross[i],
+      sigma_albatross  = gammasigma_List$sigma_albatross,
       
       gentgent_trans   = gentgents_trans[i],
       gentpred_trans   = gentpreds_trans[i],
@@ -601,26 +957,64 @@ if(iterate == TRUE){
       albspred_trans   = albspreds_trans[i],
       albsalbs_trans   = albsalbss_trans[i],
       
+      seasons_calc     = seasons_calc,
       t_departure      = timevar$t_departure
     )
     
-    values <- run_Model(timevar, popvar, Initial_values, parameters)
-    print(values)
+    # Update the popvar with the current iteration's virus introduction conditions
+    popvar$prev_infection_preds <- prev_infections_preds[i]
+    popvar$prev_infection_albs  <- prev_infections_albs[i]
+    popvar$ms_pred_day          <- midseason_pred_days[i]
+    popvar$ms_albs_day          <- midseason_albs_days[i]
+    
+    output        <- run_Model(timevar, popvar, Initial_values, parameters)
+    values        <- output$values
+    df            <- unlist(output$df, use.names = FALSE)
+    dfMaster[i, ] <- df
+    
+    for(k in 1:length(compartments)){
+      valarray[k, , i] <- values[[compartments[k]]]
+    }
+  
+    if(check_iGraph == TRUE){
+      p <- validate_iGraphs(values, popvar)
+      print(p)
+    }
+    
+    pb$tick()
   }
+  # Measure time of execution
+  iteration_time <- Sys.time()
+  execution_time <- as.numeric(difftime(iteration_time, start_time, units = "secs"))
+  hs <- as.integer(execution_time %/% 3600)
+  ms <- as.integer((execution_time %% 3600) %/% 60)
+  ss <- execution_time %% 60
+  print(cat(sprintf("Iteration Complete \n Time: %02d:%02d:%05.2f\n", hs, ms, ss)))
 }
 
 # Validation protocols
+fileLoc = "C:\\Users\\tjm336\\OneDrive - Cornell University\\01 Lab Work\\01 Rotations\\01 Bento-Gamble\\04-TriSpecies-HPAI\\LHC Walking\\Output"
+folderLoc = paste0(fileLoc, "\\", format(Sys.time(), "O_%Y-%m-%d_%H-%M-%S"))
+if(write_output == TRUE || save_plots == TRUE || check_season == TRUE || check_births == TRUE || save_data == TRUE){
+  dir.create(folderLoc)
+}
+if(write_output == TRUE){
+  write.csv(dfMaster, paste0(folderLoc, "\\InputOutputTable.csv"))
+} 
+if(save_data == TRUE){
+  saveRDS(valarray, paste0(folderLoc, "\\Valarray.rds"))
+}
 if(check_Initial_Values == TRUE){
   print("Initial Values:")
   print(Initial_values)
 }
 if(check_season         == TRUE){
   Seas_Val <- validate_Seasonality(seasonality_transmission_calc, time, timevar)
-  print(Seas_Val$p)
+  ggsave(paste0(folderLoc, "\\seasonality.png"), Seas_Val$p, width = 10, height = 5)
 }
 if(check_births         == TRUE){
   birthsplot <- validate_Births(timevar, popvar, Initial_values, muH_List)
-  print(birthsplot)
+  ggsave(paste0(folderLoc, "\\birthmigrate.png"), birthsplot, width = 10, height = 10)
 }
 
 #=======================================================================================================================#
