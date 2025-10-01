@@ -18,8 +18,7 @@ seasons_calc         <- TRUE
 iterate              <- TRUE
 cluster              <- TRUE
 num_samples          <- 1
-#numclusters          <- 2
-#doclusters           <- FALSE
+num_clusters         <- 2
 pred_Introduce       <- FALSE
 albs_Introduce       <- FALSE
 midseason_pred       <- TRUE
@@ -718,6 +717,12 @@ validate_variablecombinations <- function(iterate, cluster, check_iGraph,
   }
   if(cluster == TRUE && num_samples < 1700){
     warning("Warning: Clustering may not be effective with fewer than 1700 samples.")
+  }
+  if(num_cluster < 2 && cluster == TRUE){
+    stop("Error: Number of clusters must be at least 2 when clustering is enabled.")
+  }
+  if(num_samples < 3 && cluster == TRUE){
+    stop("Error: Number of samples must be at least 3 when clustering is enabled.")
   }
   if(cluster == TRUE && pred_Introduce == FALSE && albs_Introduce == FALSE && 
      midseason_pred == FALSE && midseason_albs == FALSE){
