@@ -4,24 +4,25 @@ start_time           <- Sys.time()
 #=======================================================================================================================#
 # Validation Variable
 check_Initial_Values <- FALSE
-check_season         <- TRUE
-check_births         <- TRUE
+check_season         <- FALSE
+check_births         <- FALSE
 check_iGraph         <- FALSE
+check_inputDistrib   <- TRUE
 
 # Save Data variables
-write_output         <- FALSE
-save_plots           <- FALSE
-save_data            <- FALSE
+write_output         <- TRUE
+save_plots           <- TRUE
+save_data            <- TRUE
 
 # Experimental Variables
 seasons_calc         <- TRUE
 iterate              <- TRUE
 cluster              <- TRUE
-num_samples          <- 1
-num_clusters         <- 2
-pred_Introduce       <- FALSE
+num_samples          <- 1500
+num_clusters         <- 30
+pred_Introduce       <- TRUE
 albs_Introduce       <- FALSE
-midseason_pred       <- TRUE
+midseason_pred       <- FALSE
 midseason_albs       <- FALSE
 
 #=======================================================================================================================#
@@ -120,24 +121,24 @@ generate_muH             <- function(){
     muH_Albs   = muH_Albs))
 }
 generate_gamma_sigma     <- function(U){
-  gentoo_inf_dur    <- qunif(U[,  5], min = 1, max = 15)
-  gentoo_inf_mort   <- qunif(U[,  6], min = 0.5, max = 0.95)
+  gentoo_inf_dur    <- qunif(U[,  5], min = 1,    max = 15)
+  gentoo_inf_mort   <- qunif(U[,  6], min = 0.50, max = 0.95)
   muIs_gentoo       <- gentoo_inf_mort / gentoo_inf_dur
   gammas_gentoo     <- 1 / gentoo_inf_dur
   gentoo_imm_dur    <- 182.5                                      # Estimate without a basis
   #sigma_gentoo      <- 1 / gentoo_imm_dur                         # Rate of Gentoo immunity loss, >0 makes it an SIRS
   sigma_gentoo      <- 0                                          # Rate of Gentoo immunity loss, >0 makes it an SIRS
   
-  preds_inf_dur     <- qunif(U[,  7], min = 1, max = 15)
-  preds_inf_mort    <- qunif(U[,  8], min = 0, max = 0.5)
+  preds_inf_dur     <- qunif(U[,  7], min = 1,    max = 15)
+  preds_inf_mort    <- qunif(U[,  8], min = 0.01, max = 0.5)
   muIs_Preds        <- preds_inf_mort / preds_inf_dur
   gammas_preds      <- 1 / preds_inf_dur
   preds_imm_dur     <- 182.5                                      # Estimate without a basis
   #sigma_preds       <- 1 / preds_imm_dur                          # Rate of predator immunity loss, >0 makes it an SIRS
   sigma_preds       <- 0                                          # Rate of predator immunity loss, >0 makes it an SIRS
   
-  Albs_inf_dur      <- qunif(U[,  9], min = 1, max = 15)
-  Albs_inf_mort     <- qunif(U[, 10], min = 0.5, max = 0.95)
+  Albs_inf_dur      <- qunif(U[,  9], min = 1,    max = 15)
+  Albs_inf_mort     <- qunif(U[, 10], min = 0.50, max = 0.95)
   muIs_Albs         <- Albs_inf_mort / Albs_inf_dur
   gammas_albatross  <- 1 / Albs_inf_dur
   albatross_imm_dur <- 182.5                                      # Estimate without a basis
@@ -292,7 +293,8 @@ create_migout_eventdata <- function(timevar, popvar, statedeparturevector){
 #=======================================================================================================================#
 #                                                  Model Functions:
 #=======================================================================================================================#
-seasonality_transmission_calc <- function(time, t_arrival, mig_day_arrival, breed_start, hatch_start, t_departure){
+seasonality_transmission_calc <- function(time, t_arrival, mig_day_arrival, breed_start, 
+                                          hatch_start, t_departure){
   if(time < (t_arrival + (mig_day_arrival / 2))){
     1 # Before arrival
   } else{
@@ -600,6 +602,13 @@ run_Model                     <- function(timevar, popvar, Initial_values, param
   )
   out <- out[!duplicated(out$Time),]
   
+  # choose the five interspecies series you want to store
+  trans_vars <- c("inc_gentpred",   # Gentoo → Predators
+                  "inc_predgent",   # Predators → Gentoo
+                  "inc_predalbs",   # Predators → Albatross
+                  "inc_albspred",   # Albatross → Predators
+                  "inc_albsalbs")   # Albatross → Albatross  (replace if you meant another)
+  
   # Connect pre- and post- migration outs and then calculate cross-species transmission events
   inc_gentgent <- parameters["gentgent_trans"] * out$Susceptible_Gentoo    * out$Infected_Gentoo
   inc_gentpred <- parameters["gentpred_trans"] * out$Susceptible_Predators * out$Infected_Gentoo
@@ -608,6 +617,24 @@ run_Model                     <- function(timevar, popvar, Initial_values, param
   inc_predalbs <- parameters["predalbs_trans"] * out$Susceptible_Albatross * out$Infected_Predators
   inc_albspred <- parameters["albspred_trans"] * out$Susceptible_Predators * out$Infected_Albatross
   inc_albsalbs <- parameters["albsalbs_trans"] * out$Susceptible_Albatross * out$Infected_Albatross
+  
+  # Create a dataframe of the series
+  run_tbl <- data.frame(
+    Time          = out$Time,
+    inc_gentpred  = inc_gentpred,
+    inc_predgent  = inc_predgent,
+    inc_predalbs  = inc_predalbs,
+    inc_albspred  = inc_albspred,
+    inc_albsalbs  = inc_albsalbs
+  )
+  
+  # Convert to long format
+  run_long <- pivot_longer(
+    run_tbl,
+    cols      = all_of(trans_vars),
+    names_to  = "series",
+    values_to = "value"
+  )
   
   # Calculate the cumulative infections for each transmission type, compartment, and in total
   dt     <- diff(out$Time)[1]
@@ -618,31 +645,30 @@ run_Model                     <- function(timevar, popvar, Initial_values, param
   cum_pa <- sum(inc_predalbs) * dt
   cum_ap <- sum(inc_albspred) * dt
   cum_aa <- sum(inc_albsalbs) * dt
-  
   CI_Gentoo    <- cum_gg + cum_pg
   CI_Predators <- cum_gp + cum_pp + cum_ap
   CI_Albatross <- cum_pa + cum_aa
   CI_Total     <- CI_Gentoo + CI_Predators + CI_Albatross
-  
+
   # Calculate R0 (Next Generation Matrix Method)
-  if(!popvar$prev_infection_albs == 0 && !popvar$prev_infection_preds == 0 && !popvar$ms_pred_day == -1 && !popvar$ms_albs_day == -1){
+  if(popvar$prev_infection_albs != 0  || popvar$prev_infection_preds != 0 || 
+     popvar$ms_pred_day         != -1 || popvar$ms_albs_day          != -1){
     beta <- make_beta(
       parameters["gentgent_trans"], parameters["gentpred_trans"],
       parameters["predgent_trans"], parameters["predpred_trans"], parameters["predalbs_trans"],
       parameters["albspred_trans"], parameters["albsalbs_trans"])
-    if(!popvar$prev_infection_albs == 0 || !popvar$prev_infection_preds == 0){
-      S0 <- c(gentoo    = 0,
-              predators = out[ timevar$t_arrival + timevar$mig_day_arrival, "Infected_Predators"],
-              albatross = out[ timevar$t_arrival + timevar$mig_day_arrival, "Infected_Albatross"])
-    } else if(!popvar$ms_pred_day == -1){
-      S0 <- c(gentoo    = 0,
-              predators = out[ popvar$ms_pred_day + 2, "Infected_Predators"],
-              albatross = 0)
-    } else if(!popvar$ms_albs_day == -1){
-      S0 <- c(gentoo    = 0,
-              predators = 0,
-              albatross = out[ popvar$ms_albs_day + 2, "Infected_Albatross"])
+    if(popvar$prev_infection_albs != 0){
+      t_eval = timevar$t_arrival + (2 * timevar$mig_day_arrival)
+    } else if(popvar$prev_infection_preds != 0){
+      t_eval = timevar$t_arrival +      timevar$mig_day_arrival
+    } else if(popvar$ms_pred_day != -1){
+      t_eval = popvar$ms_pred_day + 2
+    } else if(popvar$ms_albs_day != -1){
+      t_eval = popvar$ms_albs_day + 2
     }
+    S0 <- c(gentoo    = out[ t_eval, "Susceptible_Gentoo"],
+            predators = out[ t_eval, "Susceptible_Predators"],
+            albatross = out[ t_eval, "Susceptible_Albatross"])
     gamma <- c(parameters["gamma_gentoo"], parameters["gamma_preds"], parameters["gamma_albatross"])
     muI   <- c(parameters["muI_Gentoo"], parameters["muI_Preds"], parameters["muI_Albs"])
     eigen <- calc_R0(beta, S0, gamma, muI)
@@ -651,13 +677,32 @@ run_Model                     <- function(timevar, popvar, Initial_values, param
     R0 <- NA
   }
   
+  # First derivative of the time series
+  dS_G <- diff(out$Susceptible_Gentoo)
+  dI_G <- diff(out$Infected_Gentoo)
+  dS_P <- diff(out$Susceptible_Predators)
+  dI_P <- diff(out$Infected_Predators)
+  dS_A <- diff(out$Susceptible_Albatross)
+  dI_A <- diff(out$Infected_Albatross)
+
+  # Find local maxima of the time series
+  dS_G_Peaks <- which(diff(sign(dS_G)) == -2) + 1
+  dI_G_Peaks <- which(diff(sign(dI_G)) == -2) + 1
+  dS_P_Peaks <- which(diff(sign(dS_P)) == -2) + 1
+  dI_P_Peaks <- which(diff(sign(dI_P)) == -2) + 1
+  dS_A_Peaks <- which(diff(sign(dS_A)) == -2) + 1
+  dI_A_Peaks <- which(diff(sign(dI_A)) == -2) + 1
+
+  # Extract the times of the peaks
+  tS_G <- out$Time[dS_G_Peaks]; tI_G <- out$Time[dI_G_Peaks]
+  tS_P <- out$Time[dS_P_Peaks]; tI_P <- out$Time[dI_P_Peaks]
+  tS_A <- out$Time[dS_A_Peaks]; tI_A <- out$Time[dI_A_Peaks]
+
   # Create the return variable with all the data of interest
-  #     Note: If the number of variables being returned changes, ensure that the dfMaster function NCol argument
-  #           is adjusted accordingly, if not, the code will return an error. 
   df                     <- data.frame(prev_infection_preds = popvar$prev_infection_preds)
-  df$midseason_pred_day  <- popvar$midseason_pred_day
   df$prev_infection_albs <- popvar$prev_infection_albs
-  df$midseason_albs_day  <- popvar$midseason_albs_day
+  df$midseason_pred_day  <- popvar$ms_pred_day
+  df$midseason_albs_day  <- popvar$ms_albs_day
   df$gamma_gentoo        <- parameters["gamma_gentoo"]
   df$muI_gentoo          <- parameters["muI_Gentoo"]
   df$gamma_predators     <- parameters["gamma_preds"]
@@ -673,8 +718,11 @@ run_Model                     <- function(timevar, popvar, Initial_values, param
   df$Beta_AlbsAlbs       <- parameters["albsalbs_trans"]
   df$R0                  <- R0
   df$maxI_Gentoo         <- max(out["Infected_Gentoo"])
+  df$time_maxI_Gentoo    <- out[ which.max(out[["Infected_Gentoo"]]), "Time"]
   df$maxI_Predators      <- max(out["Infected_Predators"])
+  df$time_maxI_Predators <- out[ which.max(out[["Infected_Predators"]]), "Time"]
   df$maxI_Albatross      <- max(out["Infected_Albatross"])
+  df$time_maxI_Albatross <- out[ which.max(out[["Infected_Albatross"]]), "Time"]
   df$terI_Gentoo         <- out[ nrow(out), "Infected_Gentoo"]
   df$terI_Predators      <- out[ nrow(out), "Infected_Predators"]
   df$overwintering       <- ifelse(df$terI_Gentoo >= 1 || df$terI_Predators >= 1, 1, 0)
@@ -686,17 +734,270 @@ run_Model                     <- function(timevar, popvar, Initial_values, param
   df$deadGentoo          <- out[ nrow(out), "HPAI_Killed_Gentoo"]
   df$deadPredators       <- out[ nrow(out), "HPAI_Killed_Predators"]
   df$deadAlbatross       <- out[ nrow(out), "HPAI_Killed_Albatross"]
-  df$gentpred_transevents<- cum_gp
-  df$predgent_transevents<- cum_pg
-  df$predalbs_transevents<- cum_pa
-  df$albspred_transevents<- cum_ap
-  df$cuminf_Total        <- CI_Total
-  df$cuminf_Gentoo       <- CI_Gentoo
-  df$cuminf_Predators    <- CI_Predators
-  df$cuminf_Albatross    <- CI_Albatross
+  df$gentpred_transevents<- cum_gp;       df$predgent_transevents<- cum_pg
+  df$predalbs_transevents<- cum_pa;       df$albspred_transevents<- cum_ap
+  df$cuminf_Total        <- CI_Total;     df$cuminf_Gentoo       <- CI_Gentoo
+  df$cuminf_Predators    <- CI_Predators; df$cuminf_Albatross    <- CI_Albatross
+  df$S_G_PeakNum         <- length(tS_G); df$I_G_PeakNum         <- length(tI_G)
+  df$S_P_PeakNum         <- length(tS_P); df$I_P_PeakNum         <- length(tI_P)
+  df$S_A_PeakNum         <- length(tS_A); df$I_A_PeakNum         <- length(tI_A)
+  df$S_G_Peak            <- list(tS_G);   df$I_G_Peak            <- list(tI_G)
+  df$S_P_Peak            <- list(tS_P);   df$I_P_Peak            <- list(tI_P)
+  df$S_A_Peak            <- list(tS_A);   df$I_A_Peak            <- list(tI_A)
+
   
   # Return the dataframe
-  return(list(df = df, values = out))
+  return(list(df       = df, 
+              values   = out, 
+              run_long = run_long))
+}
+clusterSamples_euclidean      <- function(valarray, numclusters, linkage = "average", popvar,
+                                          normalize_within_run = c("none", "by_compartment", "by_species", "global_row"),
+                                          scale_across_runs = TRUE){
+  # normalize_within_run:
+  #  "none"           = original behavior (no within-run normalization)
+  #  "by_compartment" = for each run and each compartment's T-time block, z-score within that run
+  #  "global_row"     = z-score the entire row vector (all compartments & time) within that run
+  normalize_within_run <- match.arg(normalize_within_run)
+  
+  compartments_use <- c(
+    "Infected_Gentoo", "Infected_Predators", "Infected_Albatross",
+    "HPAI_Killed_Gentoo", "HPAI_Killed_Predators", "HPAI_Killed_Albatross"
+  )
+  
+  C <- length(compartments_use)
+  T <- dim(valarray)[2]
+  N <- dim(valarray)[3]
+  
+  dn <- dimnames(valarray)
+  if (is.null(dn) || is.null(dn$compartment)) {
+    stop("valarray must have dimnames with a 'compartment' entry.")
+  }
+  if (!all(compartments_use %in% dn$compartment)) {
+    missing <- setdiff(compartments_use, dn$compartment)
+    stop("These compartments are missing from valarray: ",
+         paste(missing, collapse = ", "))
+  }
+  
+  total_gentoo <- popvar$total_gentoo
+  total_preds  <- popvar$total_preds
+  total_albs   <- popvar$total_albatross
+  
+  if (is.null(total_gentoo) || is.null(total_preds) || is.null(total_albs)) {
+    stop("popvar must contain total_gentoo, total_preds, and total_albatross.")
+  }
+  
+  # Build design matrix X: rows = runs, columns = concatenated timepoints per compartment
+  X <- matrix(NA_real_, nrow = N, ncol = C * T)
+  for (j in seq_along(compartments_use)) {
+    comp <- compartments_use[j]
+    mat  <- valarray[comp, , ]                 # [time × sample]
+    X[, ((j - 1) * T + 1):(j * T)] <- t(mat)   # [sample × time]
+  }
+  
+  # ---- Within-run normalization (optional) ----
+  if (normalize_within_run == "by_species") {
+    # Map each compartment block to its species total
+    species_for_comp <- c("Gentoo", "Predators", "Albatross",
+                          "Gentoo", "Predators", "Albatross")
+    
+    totals <- list(
+      Gentoo    = total_gentoo,
+      Predators = total_preds,
+      Albatross = total_albs
+    )
+    
+    for (j in seq_along(compartments_use)) {
+      idx <- ((j - 1) * T + 1):(j * T)
+      denom <- totals[[ species_for_comp[j] ]]
+      # Divide the entire block (all timepoints, all runs) by the species total
+      X[, idx] <- X[, idx] / denom
+    }
+    # At this point, values are per-capita (or per-unit) trajectories by species.
+  }
+  
+  # Helper: safe z-score (returns 0 if sd == 0 or all NA)
+  safe_z <- function(v) {
+    if (all(is.na(v))) return(v)
+    m <- mean(v, na.rm = TRUE)
+    s <- stats::sd(v, na.rm = TRUE)
+    if (is.na(s) || s == 0) {
+      # flat block -> set to 0 so it doesn't influence distances
+      return(rep(0, length(v)))
+    } else {
+      return((v - m) / s)
+    }
+  }
+  
+  if (normalize_within_run == "by_compartment") {
+    # For each run (row) and each compartment block of length T, z-score within that run
+    for (i in 1:N) {
+      for (j in 1:C) {
+        idx <- ((j - 1) * T + 1):(j * T)
+        X[i, idx] <- safe_z(X[i, idx])
+      }
+    }
+  } else if (normalize_within_run == "global_row") {
+    # Z-score the entire row vector within the run (across all compartments & time)
+    for (i in 1:N) {
+      X[i, ] <- safe_z(X[i, ])
+    }
+  }
+  # If "none", do nothing here.
+  
+  # ---- Across-run cleaning & scaling (as in original) ----
+  # Drop columns with zero variance across runs
+  keep_cols <- which(apply(X, 2, function(v) stats::sd(v, na.rm = TRUE) > 0))
+  X <- X[, keep_cols, drop = FALSE]
+  
+  # Optional across-run standardization (column-wise z-score across runs)
+  if (scale_across_runs) {
+    # base::scale can propagate NA if an NA remains in a column; you can pre-impute if needed
+    X <- scale(X)
+  }
+  
+  # Distances & clustering
+  d  <- dist(X, method = "euclidean")
+  cat("Distance calculated: \n", summary(d), "\n")
+  hc <- hclust(d, method = linkage)
+  cl <- cutree(hc, k = numclusters)
+  return(cl)
+}
+
+#=======================================================================================================================#
+#                                                 Generate Graphs:
+#=======================================================================================================================#
+vardistplots                  <- function(dfMaster, cnum){
+  inputdf <- dfMaster %>%
+    transmute(
+      prev_infection_preds = ifelse(prev_infection_preds != 0, prev_infection_preds, NA),
+      prev_infection_albs  = ifelse(prev_infection_albs  != 0, prev_infection_albs,  NA),
+      midseason_pred_day   = ifelse(midseason_pred_day   != -1, midseason_pred_day,   NA),
+      midseason_albs_day   = ifelse(midseason_albs_day   != -1, midseason_albs_day,   NA),
+      
+      g_InfDur  = 1 / gamma_gentoo,                    
+      g_InfMort = (1 / gamma_gentoo) * muI_gentoo,
+      
+      p_InfDur  = 1 / gamma_predators,
+      p_InfMort = (1 / gamma_predators) * muI_predators,
+      
+      a_InfDur  = 1 / gamma_albatross,
+      a_InfMort = (1 / gamma_albatross) * muI_albatross,
+      
+      B_GentGent = Beta_GentGent,
+      B_GentPred = Beta_GentPred,
+      B_PredGent = Beta_PredGent,
+      B_PredPred = Beta_PredPred,
+      B_PredAlbs = Beta_PredAlbs,
+      B_AlbsPred = Beta_AlbsPred,
+      B_AlbsAlbs = Beta_AlbsAlbs,
+      
+      R0 = R0,
+      clusternum = Cluster
+    )
+  
+  df_long <- inputdf %>%
+    mutate(row_id = row_number()) %>%
+    pivot_longer(
+      cols = -c(row_id, clusternum),
+      names_to = "variable",
+      values_to = "value"
+    ) %>%
+    mutate(value = suppressWarnings(as.numeric(value))) %>%
+    filter(is.finite(value))
+  
+  df_red <- df_long %>% filter(clusternum == cnum)
+  
+  # ---- plot: constant x so each facet's box fills the width ----
+  ggplot(df_long, aes(x = 0, y = value)) +
+    geom_violin(
+      width = 0.9, trim = FALSE,
+      fill = "lightblue", color = "darkblue"
+    ) +
+    geom_jitter(
+      data  = df_red,
+      aes(x = 0, y = value),
+      width = 0.25, height = 0,
+      color = "red", size = 1.5, alpha = 0.8
+    ) +
+    facet_wrap(~ variable, scales = "free_y", ncol = 4) +
+    scale_x_continuous(breaks = NULL, labels = NULL, expand = expansion(mult = c(0, 0))) +
+    labs(
+      title = paste0("Violin Plot of Variable Space — Cluster ", cnum, " in red"),
+      x = NULL, y = "Value"
+    ) +
+    theme_minimal() +
+    theme(
+      strip.text  = element_text(face = "bold"),
+      axis.text.x = element_blank(),
+      axis.ticks.x= element_blank()
+    )
+}
+outdistgraph                  <- function(valarray, clusternum, cnum, compartments, popvar) {
+  dn <- dimnames(valarray)
+  time_labels <- dn$time
+  
+  to_int_time <- function(x) {
+    x2 <- gsub("[^0-9\\-]+", "", x)         # strip non-digits
+    suppressWarnings(as.integer(x2))
+  }
+  
+  speccomp     <- length(compartments)/3
+  yvals        <- c(popvar$total_gentoo * 1.5, popvar$total_preds * 1.5, popvar$total_albatross * 1.5)
+  colorsr      <- c("red", "blue", "orange", "darkgreen")
+  plots        <- vector("list", length(compartments))
+  names(plots) <- compartments
+  i = 1
+  for (comp in compartments) {
+    # slice: [time x sample] for this compartment
+    mat_ts <- drop(valarray[comp, , , drop = FALSE])    # [T x N]
+    if (nrow(mat_ts) != length(time_labels)) {
+      stop("Row count of mat_ts does not match length of time_labels for compartment ", comp)
+    }
+    
+    # keep only the chosen cluster
+    keep <- which(clusternum == cnum)
+    if (length(keep) == 0) {
+      warning("No samples in cluster ", cnum, " for compartment ", comp, ". Skipping.")
+      next
+    }
+    mat_ts_cluster <- mat_ts[, keep, drop = FALSE]      # [T x K]
+    
+    # build df with correct axes: rows=time, cols=runs
+    df <- as.data.frame(mat_ts_cluster, check.names = FALSE)
+    rownames(df) <- time_labels
+    
+    # long format: time column from rownames; runs come from column names
+    df_all <- df %>%
+      rownames_to_column(var = "time") %>%
+      pivot_longer(cols = -time, names_to = "run", values_to = "value") %>%
+      mutate(time = to_int_time(time)) %>%
+      filter(is.finite(time), !is.na(value))
+    
+    # average over runs for each time
+    df_avg <- df_all %>%
+      group_by(time) %>%
+      summarise(avg_value = mean(value, na.rm = TRUE), .groups = "drop")
+    
+    # plot
+    p <- ggplot(df_all, aes(x = time, y = value, group = run)) +
+      geom_line(color = "gray60", linetype = "dotted") +
+      geom_line(data = df_avg, aes(x = time, y = avg_value),
+                inherit.aes = FALSE, color = colorsr[(i %% speccomp) + 1], linewidth = 1.2) +
+      scale_y_continuous(
+        limits = c(-10, yvals[((i-1) %/% speccomp) + 1])
+      ) +
+      labs(
+        title = paste0(comp, " (Cluster ", cnum, ")"),
+        x = "Time (days)",
+        y = "Number of Individuals"
+      ) +
+      theme_minimal()
+    
+    plots[[i]] <- p 
+    i = i + 1
+  }
+  return(plots)
 }
 
 #=======================================================================================================================#
@@ -704,7 +1005,7 @@ run_Model                     <- function(timevar, popvar, Initial_values, param
 #=======================================================================================================================#
 validate_variablecombinations <- function(iterate, cluster, check_iGraph, 
                                           num_samples, pred_Introduce, albs_Introduce, 
-                                          midseason_pred, midseason_albs){
+                                          midseason_pred, midseason_albs, check_inputDistrib){
   # Combination variable check
   if(iterate == FALSE && cluster == TRUE){
     stop("Error: Cannot do clustering without iteration. Set 'iterate' to TRUE.")
@@ -718,11 +1019,17 @@ validate_variablecombinations <- function(iterate, cluster, check_iGraph,
   if(cluster == TRUE && num_samples < 1700){
     warning("Warning: Clustering may not be effective with fewer than 1700 samples.")
   }
-  if(num_cluster < 2 && cluster == TRUE){
+  if(num_clusters < 2 && cluster == TRUE){
     stop("Error: Number of clusters must be at least 2 when clustering is enabled.")
   }
   if(num_samples < 3 && cluster == TRUE){
     stop("Error: Number of samples must be at least 3 when clustering is enabled.")
+  }
+  if(check_inputDistrib == TRUE && iterate == FALSE){
+    stop("Error: Cannot check input distributions without iteration. Set 'iterate' to TRUE.")
+  }
+  if(check_inputDistrib == TRUE && cluster == FALSE){
+    stop("Error: Cannot check input distributions without clustering. Set 'cluster' to TRUE.")
   }
   if(cluster == TRUE && pred_Introduce == FALSE && albs_Introduce == FALSE && 
      midseason_pred == FALSE && midseason_albs == FALSE){
@@ -743,7 +1050,7 @@ validate_Seasonality          <- function(func, time, timevar){
   
   # Generate Plot for Values
   p <- ggplot(df, aes(x = time, y = value)) +
-    geom_line(color = "steelblue", size = 1) +
+    geom_line(color = "steelblue", linewidth = 1) +
     labs(
       title = "Seasonality Transmission Over Time",
       x     = "Time Interval (days)",
@@ -788,10 +1095,10 @@ validate_Births               <- function(timevar, popvar, Initial_values, muH_L
     t_departure      = timevar$t_departure
   )
   
-  popvar$prev_infection_preds <- 0
-  popvar$prev_infection_albs  <- 0
-  popvar$midseason_pred_day   <- -1
-  popvar$midseason_albs_day   <- -1
+  popvar$prev_infection_preds <-  0
+  popvar$prev_infection_albs  <-  0
+  popvar$ms_pred_day          <- -1
+  popvar$ms_albs_day          <- -1
   
   # Run the model to get values for the whole time range
   output <- run_Model(timevar, popvar, Initial_values, parmsBirth)
@@ -872,7 +1179,12 @@ validate_iGraphs              <- function(values, popvar){
 # Validate variable combination used
 validate_variablecombinations(iterate, cluster, check_iGraph, 
                               num_samples, pred_Introduce, albs_Introduce, 
-                              midseason_pred, midseason_albs)
+                              midseason_pred, midseason_albs, check_inputDistrib)
+
+# Generate popvar and timevar
+popvar          <- generate_popvar()
+timevar         <- generate_timevar()
+
 
 # Generate Latin Hypercube parameters
 U <- randomLHS(n = num_samples, k = 17)
@@ -892,9 +1204,7 @@ ifelse(midseason_albs == TRUE,
        midseason_albs_days   <- rep(-1, num_samples))
 
 # Generate global variables
-popvar          <- generate_popvar()
 Initial_values  <- generate_Intitial_values(popvar = popvar)
-timevar         <- generate_timevar()
 muH_List        <- generate_muH()
 gammasigma_List <- generate_gamma_sigma(U)
 gentgents_trans <- qunif(U[, 11], min = 0, max = 0.00005)
@@ -907,9 +1217,11 @@ albsalbss_trans <- qunif(U[, 17], min = 0, max = 0.00005)
 time            <- seq(from = 0, to =  timevar$horizon)
 
 if(iterate == TRUE){
-  dfMaster                      <- data.frame(matrix(NA, nrow = num_samples, ncol = 38))
+  dfMaster         <- tibble()
+  all_series_long  <- list()
   
-  # Establish the valarray variable that will hold all the values for the compartments for all the different iterations of the model
+  # Establish the valarray variable that will hold all the values for the compartments 
+  #       for all the different iterations of the model
   compartments <- c(
     "Susceptible_Gentoo",    "Infected_Gentoo",    "Recovered_Gentoo",    "HPAI_Killed_Gentoo",
     "Susceptible_Predators", "Infected_Predators", "Recovered_Predators", "HPAI_Killed_Predators",
@@ -972,15 +1284,23 @@ if(iterate == TRUE){
     popvar$ms_pred_day          <- midseason_pred_days[i]
     popvar$ms_albs_day          <- midseason_albs_days[i]
     
-    output        <- run_Model(timevar, popvar, Initial_values, parameters)
-    values        <- output$values
-    df            <- unlist(output$df, use.names = FALSE)
-    dfMaster[i, ] <- df
+    # Run the model for the current iteration
+    output <- run_Model(timevar, popvar, Initial_values, parameters)
     
+    # Save values in the appropriate places
+    run_long             <- output$run_long
+    run_long$run_id      <- i
+    values               <- output$values
+    df                   <- output$df
+    df$run_id            <- i
+    dfMaster             <- bind_rows(dfMaster, df)
+    all_series_long[[i]] <- run_long
+    
+    # Put the values into the valarray
     for(k in 1:length(compartments)){
       valarray[k, , i] <- values[[compartments[k]]]
     }
-  
+    # If checking iGraph, generate the plots
     if(check_iGraph == TRUE){
       p <- validate_iGraphs(values, popvar)
       print(p)
@@ -988,6 +1308,8 @@ if(iterate == TRUE){
     
     pb$tick()
   }
+  
+
   # Measure time of execution
   iteration_time <- Sys.time()
   execution_time <- as.numeric(difftime(iteration_time, start_time, units = "secs"))
@@ -996,22 +1318,26 @@ if(iterate == TRUE){
   ss <- execution_time %% 60
   print(cat(sprintf("Iteration Complete \n Time: %02d:%02d:%05.2f\n", hs, ms, ss)))
 }
+if(cluster == TRUE){
+  clusters <- clusterSamples_euclidean(valarray, num_clusters, linkage = "average", popvar,
+                                       normalize_within_run = "by_species", scale_across_runs = TRUE)
+  dfMaster$Cluster <- as.factor(clusters)
+}
 
-# Validation protocols
+# Validation & Saving protocols
 fileLoc = "C:\\Users\\tjm336\\OneDrive - Cornell University\\01 Lab Work\\01 Rotations\\01 Bento-Gamble\\04-TriSpecies-HPAI\\LHC Walking\\Output"
 folderLoc = paste0(fileLoc, "\\", format(Sys.time(), "O_%Y-%m-%d_%H-%M-%S"))
-if(write_output == TRUE || save_plots == TRUE || check_season == TRUE || check_births == TRUE || save_data == TRUE){
+if(check_Initial_Values == TRUE ||
+   check_season         == TRUE || 
+   check_births         == TRUE ||
+   check_inputDistrib   == TRUE ||
+   write_output         == TRUE ||
+   save_data            == TRUE ||
+   save_plots           == TRUE  ){
   dir.create(folderLoc)
 }
-if(write_output == TRUE){
-  write.csv(dfMaster, paste0(folderLoc, "\\InputOutputTable.csv"))
-} 
-if(save_data == TRUE){
-  saveRDS(valarray, paste0(folderLoc, "\\Valarray.rds"))
-}
 if(check_Initial_Values == TRUE){
-  print("Initial Values:")
-  print(Initial_values)
+  write.csv(Initial_values, paste0(folderLoc, "\\Initial_Values.csv"))
 }
 if(check_season         == TRUE){
   Seas_Val <- validate_Seasonality(seasonality_transmission_calc, time, timevar)
@@ -1020,6 +1346,28 @@ if(check_season         == TRUE){
 if(check_births         == TRUE){
   birthsplot <- validate_Births(timevar, popvar, Initial_values, muH_List)
   ggsave(paste0(folderLoc, "\\birthmigrate.png"), birthsplot, width = 10, height = 10)
+}
+if(check_inputDistrib   == TRUE){
+  for (i in 1:num_clusters){
+    p <- vardistplots(dfMaster, i)
+    ggsave(paste0(folderLoc, "\\InputDistrib_Cluster", i, ".png"), p, width = 14, height = 8)
+  }
+}
+if(write_output         == TRUE){
+  dfScalar <- dfMaster[, !vapply(dfMaster, is.list, logical(1))]
+  write.csv(dfScalar, paste0(folderLoc, "\\InputOutputTable.csv"))
+} 
+if(save_data            == TRUE){
+  saveRDS(dfMaster,        paste0(folderLoc, "\\InputOutputTable.rds"))
+  saveRDS(valarray,        paste0(folderLoc, "\\Valarray.rds"))
+  saveRDS(all_series_long, paste0(folderLoc, "\\transevents.rds"))
+}
+if(save_plots           == TRUE){
+  for(i in 1:num_clusters){
+    plots <- outdistgraph(valarray, clusters, i, compartments, popvar)
+    p     <- plot_grid(plotlist = plots, ncol = length(compartments)/3, align = "hv")
+    ggsave(paste0(folderLoc, "\\CompartmentGraphs_Cluster_", i,".png"), p, width = 15, height = 10)
+  }
 }
 
 #=======================================================================================================================#
@@ -1034,7 +1382,7 @@ ss <- execution_time %% 60
 print(cat(sprintf("Execution Time: %02d:%02d:%05.2f\n", hs, ms, ss)))
 
 # Clear all environmental variables
-#rm(list = ls())
+rm(list = ls())
 
 #=======================================================================================================================#
 #                                                   Sources:
