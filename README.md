@@ -2,13 +2,13 @@
 
 LHC-Walk-v01.R: No clustering, only heatmap
 
-LHC-Walk-v02.R: Migration is event data, have saves individual graphs for each simulation
+LHC-Walk-v02.R: Migration is an event not piecewise. Saves individual graphs for each simulation
 
 LHC-Walk-v03.R: Added R0 calculation (NGM)
 
 LHC-Walk-v04.R: First attempt at Heirarchical Euclidean Clustering
 
-LHC-Walk-v05.R: Separated Albatross and Predator migration, second attempt at Heirarchical Euclidean Clustering
+LHC-Walk-v05.R: Separated Albatross and Predator migration. Second attempt at Heirarchical Euclidean Clustering
 
 LHC-Walk-v06.R: Got the validation functions up and running (most importantly validate_Births) and got them working correctly
 
