@@ -4,23 +4,23 @@ start_time           <- Sys.time()
 #=======================================================================================================================#
 # Validation Variable
 check_Initial_Values <- FALSE
-check_season         <- FALSE
+check_season         <- TRUE
 check_births         <- FALSE
 check_iGraph         <- FALSE
-check_inputDistrib   <- TRUE
+check_inputDistrib   <- FALSE
 
 # Save Data variables
-write_output         <- TRUE
-save_plots           <- TRUE
-save_data            <- TRUE
+write_output         <- FALSE
+save_plots           <- FALSE
+save_data            <- FALSE
 
 # Experimental Variables
 seasons_calc         <- TRUE
-iterate              <- TRUE
-cluster              <- TRUE
+iterate              <- FALSE
+cluster              <- FALSE
 num_samples          <- 1500
 num_clusters         <- 30
-pred_Introduce       <- TRUE
+pred_Introduce       <- FALSE
 albs_Introduce       <- FALSE
 midseason_pred       <- FALSE
 midseason_albs       <- FALSE
@@ -37,6 +37,7 @@ library(tibble)
 library(cowplot)
 library(progress)
 library(ggh4x)
+library(here)
 
 #=======================================================================================================================#
 #                                                Generate Variables:
@@ -265,6 +266,10 @@ create_migout_eventdata <- function(timevar, popvar, statedeparturevector){
   I_Predators <- statedeparturevector["I_Predators"]
   I_Albatross <- statedeparturevector["I_Albatross"]
   
+  R_Gentoo    <- statedeparturevector["R_Gentoo"]
+  R_Predators <- statedeparturevector["R_Predators"]
+  R_Albatross <- statedeparturevector["R_Albatross"]
+  
   S_Gentoo_Migout    <- S_Gentoo    * (1 - popvar$ResPer_gentoo)    / L
   S_Predators_Migout <- S_Predators * (1 - popvar$ResPer_preds)     / L
   S_Albatross_Migout <- S_Albatross * (1 - popvar$ResPer_albatross) / L
@@ -272,14 +277,21 @@ create_migout_eventdata <- function(timevar, popvar, statedeparturevector){
   I_Gentoo_Migout    <- I_Gentoo    * (1 - popvar$ResPer_gentoo)    / L
   I_Predators_Migout <- I_Predators * (1 - popvar$ResPer_preds)     / L
   I_Albatross_Migout <- I_Albatross * (1 - popvar$ResPer_albatross) / L
+
+  
+  R_Gentoo_Migout    <- R_Gentoo    * (1 - popvar$ResPer_gentoo)    / L
+  R_Predators_Migout <- R_Predators * (1 - popvar$ResPer_preds)     / L
+  R_Albatross_Migout <- R_Albatross * (1 - popvar$ResPer_albatross) / L
   
   migout_eventdata <- data.frame(
-    var    = rep(c("S_Gentoo","S_Predators", "S_Albatross", 
-                   "I_Gentoo", "I_Predators", "I_Albatross"),  
+    var    = rep(c("S_Gentoo", "S_Predators", "S_Albatross", 
+                   "I_Gentoo", "I_Predators", "I_Albatross",
+                   "R_Gentoo", "R_Predators", "R_Albatross"),  
                  each = length(migout_times)),
-    time   = rep(migout_times, times = 6),
+    time   = rep(migout_times, times = 9),
     value  = rep(c(- S_Gentoo_Migout, - S_Predators_Migout, - S_Albatross_Migout, 
-                   - I_Gentoo_Migout, - I_Predators_Migout, - I_Albatross_Migout), 
+                   - I_Gentoo_Migout, - I_Predators_Migout, - I_Albatross_Migout,
+                   - R_Gentoo_Migout, - R_Predators_Migout, - R_Albatross_Migout), 
                  each = length(migout_times)),
     method = "add"
   )
@@ -302,7 +314,7 @@ seasonality_transmission_calc <- function(time, t_arrival, mig_day_arrival, bree
       2 # During Arrival/Mating
     } else{
       if(time < hatch_start){
-        1 # After eggs are laid
+        1.5 # After eggs are laid
       } else{
         if(time < t_departure){
           2 # After eggs are hatched
@@ -431,7 +443,8 @@ HPAI_dyn                      <- function(time, state, parameters){
       sigma_gentoo    * R_Gentoo
   
   dI_Gentoo = 
-    - muI_Gentoo      * I_Gentoo +                  
+    - muI_Gentoo      * I_Gentoo -  
+      muH_Gentoo      * I_Gentoo +
       gentgent_trans  * S_Gentoo    * I_Gentoo    * seasMod +
       predgent_trans  * S_Gentoo    * I_Predators * seasMod -
       gamma_gentoo    * I_Gentoo
@@ -454,7 +467,8 @@ HPAI_dyn                      <- function(time, state, parameters){
       sigma_preds     * R_Predators
   
   dI_Predators = 
-    - muI_Preds       * I_Predators +              
+    - muI_Preds       * I_Predators -
+      muH_Preds       * I_Predators +
       gentpred_trans  * S_Predators * I_Gentoo    * seasMod +
       predpred_trans  * S_Predators * I_Predators * seasMod +
       albspred_trans  * S_Predators * I_Albatross * seasMod -
@@ -484,7 +498,8 @@ HPAI_dyn                      <- function(time, state, parameters){
       sigma_albatross * R_Albatross
   
   dI_Albatross = 
-    - mort_I_alb +
+    - mort_I_alb -
+      mort_S_alb +
       predalbs_trans  * S_Albatross * I_Predators * seasMod +
       albsalbs_trans  * S_Albatross * I_Albatross * seasMod -
       gamma_albatross * I_Albatross
@@ -697,6 +712,11 @@ run_Model                     <- function(timevar, popvar, Initial_values, param
   tS_G <- out$Time[dS_G_Peaks]; tI_G <- out$Time[dI_G_Peaks]
   tS_P <- out$Time[dS_P_Peaks]; tI_P <- out$Time[dI_P_Peaks]
   tS_A <- out$Time[dS_A_Peaks]; tI_A <- out$Time[dI_A_Peaks]
+  
+  # Extract the values of the peaks
+  vS_G <- out$Susceptible_Gentoo[dS_G_Peaks];    vI_G <- out$Infected_Gentoo[dI_G_Peaks]
+  vS_P <- out$Susceptible_Predators[dS_P_Peaks]; vI_P <- out$Infected_Predators[dI_P_Peaks]
+  vS_A <- out$Susceptible_Albatross[dS_A_Peaks]; vI_A <- out$Infected_Albatross[dI_A_Peaks]
 
   # Create the return variable with all the data of interest
   df                     <- data.frame(prev_infection_preds = popvar$prev_infection_preds)
@@ -723,8 +743,8 @@ run_Model                     <- function(timevar, popvar, Initial_values, param
   df$time_maxI_Predators <- out[ which.max(out[["Infected_Predators"]]), "Time"]
   df$maxI_Albatross      <- max(out["Infected_Albatross"])
   df$time_maxI_Albatross <- out[ which.max(out[["Infected_Albatross"]]), "Time"]
-  df$terI_Gentoo         <- out[ nrow(out), "Infected_Gentoo"]
-  df$terI_Predators      <- out[ nrow(out), "Infected_Predators"]
+  df$terI_Gentoo         <- round(out[ nrow(out), "Infected_Gentoo"])
+  df$terI_Predators      <- round(out[ nrow(out), "Infected_Predators"])
   df$overwintering       <- ifelse(df$terI_Gentoo >= 1 || df$terI_Predators >= 1, 1, 0)
   df$outbreakdur         <- length(which(out$Infected_Gentoo + out$Infected_Predators + out$Infected_Albatross > 2))
   df$outbreakspan        <- ifelse(df$outbreakdur > (timevar$t_departure - timevar$t_arrival - 5), 1, 0)
@@ -744,6 +764,9 @@ run_Model                     <- function(timevar, popvar, Initial_values, param
   df$S_G_Peak            <- list(tS_G);   df$I_G_Peak            <- list(tI_G)
   df$S_P_Peak            <- list(tS_P);   df$I_P_Peak            <- list(tI_P)
   df$S_A_Peak            <- list(tS_A);   df$I_A_Peak            <- list(tI_A)
+  df$S_G_PeakValue       <- list(vS_G);   df$I_G_PeakValue       <- list(vI_G)
+  df$S_P_PeakValue       <- list(vS_P);   df$I_P_PeakValue       <- list(vI_P)
+  df$S_A_PeakValue       <- list(vS_A);   df$I_A_PeakValue       <- list(vI_A)
 
   
   # Return the dataframe
@@ -1325,7 +1348,7 @@ if(cluster == TRUE){
 }
 
 # Validation & Saving protocols
-fileLoc = "C:\\Users\\tjm336\\OneDrive - Cornell University\\01 Lab Work\\01 Rotations\\01 Bento-Gamble\\04-TriSpecies-HPAI\\LHC Walking\\Output"
+fileLoc = here("Output")
 folderLoc = paste0(fileLoc, "\\", format(Sys.time(), "O_%Y-%m-%d_%H-%M-%S"))
 if(check_Initial_Values == TRUE ||
    check_season         == TRUE || 
