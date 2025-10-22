@@ -335,13 +335,13 @@ I_Albatross_Peaks <- function(Valarray, dfMaster, compartments, outputLoc){
     tS_P <- out$Time[dS_P_Peaks]; tI_P <- out$Time[dI_P_Peaks]
     tS_A <- out$Time[dS_A_Peaks]; tI_A <- out$Time[dI_A_Peaks]
     
-    if(length(tI_P) == 1){
+    if(length(tI_A) == 1){
       dfMaster$Cluster[i] = 1
-    } else if (length(tI_P) == 2){
+    } else if (length(tI_A) == 2){
       dfMaster$Cluster[i] = 2
-    } else if (length(tI_P) == 3){
+    } else if (length(tI_A) == 3){
       dfMaster$Cluster[i] = 3
-    } else if (length(tI_P) >= 4){
+    } else if (length(tI_A) >= 4){
       dfMaster$Cluster[i] = 4
     }
   }
@@ -380,8 +380,8 @@ compartments <- c(
 
 outputLoc <- paste0(here("ScenarioAnalysis/Output"),"/",scenario, "-", format(Sys.time(), "O_%Y-%m-%d_%H-%M-%S"))
 dir.create(outputLoc)
-I_Gentoo_Peaks(Valarray, dfMaster, compartments, outputLoc)
-I_Predators_Peaks(Valarray, dfMaster, compartments, outputLoc)
+#I_Gentoo_Peaks(Valarray, dfMaster, compartments, outputLoc)
+#I_Predators_Peaks(Valarray, dfMaster, compartments, outputLoc)
 I_Albatross_Peaks(Valarray, dfMaster, compartments, outputLoc)
 #=======================================================================================================================#
 #                                                   Clean Up:
